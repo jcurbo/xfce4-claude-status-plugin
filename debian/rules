@@ -11,3 +11,6 @@ override_dh_auto_install:
 
 override_dh_auto_clean:
 	$(MAKE) clean
+
+override_dh_auto_test:
+	# Skip tests - cppcheck is for local development only

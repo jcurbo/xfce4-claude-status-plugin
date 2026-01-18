@@ -1,0 +1,8 @@
+xfce4-claude-status-plugin (0.1.0-1) unstable; urgency=low
+
+  * Initial release
+  * Shows 5-hour and 7-day rate limit usage
+  * Color-coded progress bars
+  * Reads credentials from Claude Code
+
+ -- James Curbo <james@curbo.org>  Fri, 17 Jan 2025 17:00:00 +0000

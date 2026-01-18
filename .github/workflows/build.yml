@@ -1,0 +1,222 @@
+name: Build Debian Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        release: [bookworm, trixie, sid]
+
+    container:
+      image: debian:${{ matrix.release }}
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y build-essential pkg-config debhelper \
+            libxfce4panel-2.0-dev libxfce4ui-2-dev libgtk-3-dev \
+            libjson-glib-dev libsoup-3.0-dev git
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build package
+        run: dpkg-buildpackage -us -uc -b
+
+      - name: Rename with release suffix
+        run: |
+          mkdir -p artifacts
+          for f in ../*.deb; do
+            base=$(basename "$f")
+            newname="${base%.deb}_${{ matrix.release }}.deb"
+            mv "$f" "artifacts/$newname"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: debs-${{ matrix.release }}
+          path: artifacts/*.deb
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: debs
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: debs/*.deb
+
+  publish-apt:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 0
+        continue-on-error: true
+
+      - name: Create gh-pages branch if needed
+        run: |
+          if [ ! -d .git ]; then
+            git init
+            git checkout -b gh-pages
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: incoming
+          merge-multiple: true
+
+      - name: Setup apt repository
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils
+
+          # Create directory structure for codenames
+          mkdir -p pool/main
+          for release in bookworm trixie sid; do
+            mkdir -p dists/$release/main/binary-amd64
+          done
+
+          # Create aliases for stable/testing/unstable
+          mkdir -p dists/stable/main/binary-amd64
+          mkdir -p dists/testing/main/binary-amd64
+          mkdir -p dists/unstable/main/binary-amd64
+
+          # Copy new packages to pool
+          cp incoming/*.deb pool/main/ 2>/dev/null || true
+
+          # Generate Packages files for each release
+          for release in bookworm trixie sid; do
+            cd $GITHUB_WORKSPACE
+
+            rm -f dists/$release/main/binary-amd64/Packages
+            for deb in pool/main/*_${release}.deb; do
+              if [ -f "$deb" ]; then
+                dpkg-deb -I "$deb" control >> dists/$release/main/binary-amd64/Packages
+                echo "Filename: $deb" >> dists/$release/main/binary-amd64/Packages
+                echo "Size: $(stat -c %s "$deb")" >> dists/$release/main/binary-amd64/Packages
+                echo "MD5sum: $(md5sum "$deb" | cut -d' ' -f1)" >> dists/$release/main/binary-amd64/Packages
+                echo "SHA256: $(sha256sum "$deb" | cut -d' ' -f1)" >> dists/$release/main/binary-amd64/Packages
+                echo "" >> dists/$release/main/binary-amd64/Packages
+              fi
+            done
+
+            gzip -kf dists/$release/main/binary-amd64/Packages || true
+
+            # Determine suite name
+            case $release in
+              bookworm) suite="stable" ;;
+              trixie) suite="testing" ;;
+              sid) suite="unstable" ;;
+            esac
+
+            # Create Release file
+            cat > dists/$release/Release << EOF
+          Origin: jcurbo
+          Label: xfce4-claude-status-plugin
+          Suite: $suite
+          Codename: $release
+          Architectures: amd64
+          Components: main
+          Description: XFCE4 Claude Status Plugin apt repository
+          EOF
+
+            # Add checksums to Release
+            echo "MD5Sum:" >> dists/$release/Release
+            for f in dists/$release/main/binary-amd64/Packages*; do
+              if [ -f "$f" ]; then
+                size=$(stat -c %s "$f")
+                md5=$(md5sum "$f" | cut -d' ' -f1)
+                path=${f#dists/$release/}
+                printf " %s %d %s\n" "$md5" "$size" "$path" >> dists/$release/Release
+              fi
+            done
+
+            echo "SHA256:" >> dists/$release/Release
+            for f in dists/$release/main/binary-amd64/Packages*; do
+              if [ -f "$f" ]; then
+                size=$(stat -c %s "$f")
+                sha=$(sha256sum "$f" | cut -d' ' -f1)
+                path=${f#dists/$release/}
+                printf " %s %d %s\n" "$sha" "$size" "$path" >> dists/$release/Release
+              fi
+            done
+
+            # Create symlinks for suite aliases
+            rm -rf dists/$suite
+            ln -sf $release dists/$suite
+          done
+
+      - name: Create index page
+        run: |
+          cat > index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head><title>xfce4-claude-status-plugin apt repository</title></head>
+          <body>
+          <h1>xfce4-claude-status-plugin apt repository</h1>
+          <h2>Installation</h2>
+          <pre>
+          # Add the repository (choose your Debian version)
+
+          # For Debian Bookworm (stable):
+          echo "deb [trusted=yes] https://jcurbo.github.io/xfce4-claude-status-plugin stable main" | sudo tee /etc/apt/sources.list.d/claude-status.list
+
+          # For Debian Trixie (testing):
+          echo "deb [trusted=yes] https://jcurbo.github.io/xfce4-claude-status-plugin testing main" | sudo tee /etc/apt/sources.list.d/claude-status.list
+
+          # For Debian Sid (unstable):
+          echo "deb [trusted=yes] https://jcurbo.github.io/xfce4-claude-status-plugin unstable main" | sudo tee /etc/apt/sources.list.d/claude-status.list
+
+          # Update and install
+          sudo apt update
+          sudo apt install xfce4-claude-status-plugin
+          </pre>
+          <p>You can also use codenames directly: bookworm, trixie, sid</p>
+          <h2>Available packages</h2>
+          <ul>
+          <li><a href="dists/stable/">stable</a> (bookworm)</li>
+          <li><a href="dists/testing/">testing</a> (trixie)</li>
+          <li><a href="dists/unstable/">unstable</a> (sid)</li>
+          </ul>
+          </body>
+          </html>
+          EOF
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Update apt repository for ${{ github.ref_name }}" || echo "No changes to commit"
+          git push origin gh-pages --force || git push --set-upstream origin gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

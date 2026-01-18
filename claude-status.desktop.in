@@ -1,0 +1,9 @@
+[Xfce Panel]
+Type=X-XFCE-PanelPlugin
+Encoding=UTF-8
+Name=Claude Status
+Comment=Shows Claude Max/Pro usage limits
+Icon=dialog-information
+X-XFCE-Module=claude-status
+X-XFCE-Internal=false
+X-XFCE-API=2.0

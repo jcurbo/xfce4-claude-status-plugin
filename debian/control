@@ -1,0 +1,24 @@
+Source: xfce4-claude-status-plugin
+Section: xfce
+Priority: optional
+Maintainer: James Curbo <james@curbo.org>
+Homepage: https://github.com/jcurbo/xfce4-claude-status-plugin
+Build-Depends: debhelper-compat (= 13),
+               libxfce4panel-2.0-dev (>= 4.18),
+               libxfce4ui-2-dev (>= 4.18),
+               libgtk-3-dev (>= 3.24),
+               libjson-glib-dev (>= 1.6),
+               libsoup-3.0-dev (>= 3.0),
+               pkg-config
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: xfce4-claude-status-plugin
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: XFCE panel plugin showing Claude Max/Pro usage limits
+ Displays Claude API rate limit usage (5-hour and 7-day windows)
+ with colored progress bars in the XFCE panel.
+ .
+ Requires Claude Code to be installed and logged in with a
+ Max or Pro subscription.

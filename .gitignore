@@ -1,0 +1,24 @@
+# Build artifacts
+*.deb
+*.buildinfo
+*.changes
+*.so
+*.o
+
+# Debian build directories
+debian/xfce4-claude-status-plugin/
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/*.substvars
+debian/*.log
+
+# Generated files
+claude-status.desktop
+
+# Private/local files (tracked locally, not pushed to GitHub)
+CLAUDE.md
+.claude/
+.serena/
+.vscode/
+.cc/

@@ -14,10 +14,11 @@ CC = gcc
 PKG_CONFIG = pkg-config
 PACKAGES = libxfce4panel-2.0 libxfce4ui-2 gtk+-3.0 json-glib-1.0 libsoup-3.0
 
-CFLAGS = -Wall -fPIC -shared $(shell $(PKG_CONFIG) --cflags $(PACKAGES))
+CFLAGS = -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Wno-unused-parameter \
+         -fPIC -shared $(shell $(PKG_CONFIG) --cflags $(PACKAGES))
 LDFLAGS = $(shell $(PKG_CONFIG) --libs $(PACKAGES))
 
-.PHONY: all clean install uninstall
+.PHONY: all clean install uninstall check
 
 all: $(PLUGIN_LIB)
 
@@ -39,3 +40,6 @@ uninstall:
 
 clean:
 	rm -f $(PLUGIN_LIB) $(PLUGIN_NAME).desktop
+
+check: $(PLUGIN_NAME).c
+	cppcheck --enable=all --suppress=missingIncludeSystem $<

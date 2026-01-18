@@ -2,7 +2,7 @@
  * xfce4-claude-status-plugin
  * XFCE Panel Plugin showing Claude Max/Pro rate limit usage
  *
- * Copyright (c) 2025 James Curbo
+ * Copyright (c) 2026 James Curbo
  * SPDX-License-Identifier: MIT
  */
 
@@ -16,7 +16,9 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
-#define CONTEXT_WINDOW_SIZE 200000
+/* Context window sizes by model (in tokens) */
+#define CONTEXT_WINDOW_DEFAULT 200000
+#define CONTEXT_WINDOW_1M 1000000
 
 /* Default configuration values */
 #define DEFAULT_UPDATE_INTERVAL 30
@@ -57,7 +59,13 @@ typedef struct {
     gdouble seven_day_pct_val;
     gchar *five_hour_reset_str;
     gchar *seven_day_reset_str;
+    gchar *five_hour_reset_time;   /* Full reset time for tooltip */
+    gchar *seven_day_reset_time;   /* Full reset time for tooltip */
     gdouble context_pct;
+    gint64 context_tokens;         /* Actual token count */
+    gint64 context_window_size;    /* Context window size */
+    gchar *model_name;             /* Current model name */
+    GDateTime *last_updated;       /* Last successful update time */
 
     /* Configuration */
     gint update_interval;
@@ -78,6 +86,12 @@ typedef struct {
 
     /* Error state */
     gboolean has_credentials_error;
+
+    /* HTTP request cancellation */
+    GCancellable *cancellable;
+
+    /* Retry counter for 401 errors */
+    gint auth_retry_count;
 } ClaudeStatusPlugin;
 
 /* Forward declarations */
@@ -118,7 +132,7 @@ static gchar* make_bar(gdouble pct, int width) {
 }
 
 /* Get color based on percentage and thresholds */
-static const gchar* get_color(ClaudeStatusPlugin *data, gdouble pct) {
+static const gchar* get_color(const ClaudeStatusPlugin *data, gdouble pct) {
     if (pct < data->yellow_threshold) return "#5faf5f";  /* green */
     if (pct < data->orange_threshold) return "#d7af5f";  /* yellow */
     if (pct < data->red_threshold) return "#d78700";     /* orange */
@@ -205,9 +219,18 @@ static gboolean load_credentials(ClaudeStatusPlugin *data) {
     g_free(contents);
 
     JsonNode *root = json_parser_get_root(parser);
-    JsonObject *obj = json_node_get_object(root);
-    JsonObject *oauth = json_object_get_object_member(obj, "claudeAiOauth");
+    if (!JSON_NODE_HOLDS_OBJECT(root)) {
+        g_object_unref(parser);
+        return FALSE;
+    }
 
+    JsonObject *obj = json_node_get_object(root);
+    if (!json_object_has_member(obj, "claudeAiOauth")) {
+        g_object_unref(parser);
+        return FALSE;
+    }
+
+    JsonObject *oauth = json_object_get_object_member(obj, "claudeAiOauth");
     if (!oauth) {
         g_object_unref(parser);
         return FALSE;
@@ -320,6 +343,16 @@ static gchar* find_latest_transcript(void) {
     return latest_path;
 }
 
+/* Get context window size for a model name */
+static gint64 get_context_window_for_model(const gchar *model) {
+    if (!model) return CONTEXT_WINDOW_DEFAULT;
+
+    /* Sonnet 4 and 4.5 can have 1M context in beta for tier 4 orgs,
+     * but consumer OAuth users get 200K. Default to 200K for safety.
+     * This could be made configurable if users have 1M access. */
+    return CONTEXT_WINDOW_DEFAULT;
+}
+
 /* Read context window usage from transcript */
 static void claude_status_read_context(ClaudeStatusPlugin *data) {
     gchar *transcript_path = find_latest_transcript();
@@ -335,11 +368,11 @@ static void claude_status_read_context(ClaudeStatusPlugin *data) {
         return;
     }
 
-    /* We want the LAST assistant message's input_tokens - that represents
-     * the full context size at that point */
+    /* We want the LAST assistant message's input_tokens and model */
     gint64 last_input = 0;
     gint64 last_cache_creation = 0;
     gint64 last_cache_read = 0;
+    gchar *last_model = NULL;
 
     char *line = NULL;
     size_t len = 0;
@@ -363,6 +396,13 @@ static void claude_status_read_context(ClaudeStatusPlugin *data) {
         if (type && g_strcmp0(type, "assistant") == 0) {
             JsonObject *message = json_object_get_object_member(obj, "message");
             if (message) {
+                /* Get the model name */
+                const gchar *model = json_object_get_string_member(message, "model");
+                if (model) {
+                    g_free(last_model);
+                    last_model = g_strdup(model);
+                }
+
                 JsonObject *usage = json_object_get_object_member(message, "usage");
                 if (usage) {
                     /* Get the latest values - input_tokens + cache tokens = total context */
@@ -381,7 +421,15 @@ static void claude_status_read_context(ClaudeStatusPlugin *data) {
 
     /* Total context = input + cache_creation + cache_read */
     gint64 total_context = last_input + last_cache_creation + last_cache_read;
-    data->context_pct = (gdouble)total_context / CONTEXT_WINDOW_SIZE * 100.0;
+    gint64 context_window = get_context_window_for_model(last_model);
+
+    /* Store values for tooltip */
+    data->context_tokens = total_context;
+    data->context_window_size = context_window;
+    g_free(data->model_name);
+    data->model_name = last_model;  /* Transfer ownership */
+
+    data->context_pct = (gdouble)total_context / context_window * 100.0;
     if (data->context_pct > 100) data->context_pct = 100;
 }
 
@@ -395,6 +443,11 @@ static void on_usage_response(GObject *source, GAsyncResult *result, gpointer us
     GBytes *bytes = soup_session_send_and_read_finish(SOUP_SESSION(source), result, &error);
 
     if (error) {
+        /* Check if cancelled (plugin being freed) */
+        if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+            g_error_free(error);
+            return;
+        }
         g_error_free(error);
         return;
     }
@@ -402,6 +455,17 @@ static void on_usage_response(GObject *source, GAsyncResult *result, gpointer us
     /* Check for 401 Unauthorized - token may have been refreshed */
     if (msg && soup_message_get_status(msg) == 401) {
         g_bytes_unref(bytes);
+
+        /* Limit retries to prevent infinite loop */
+        if (data->auth_retry_count >= 2) {
+            data->auth_retry_count = 0;
+            data->has_credentials_error = TRUE;
+            claude_status_update(data);
+            return;
+        }
+
+        data->auth_retry_count++;
+
         /* Clear cached token and try to reload credentials */
         g_free(data->access_token);
         data->access_token = NULL;
@@ -415,6 +479,9 @@ static void on_usage_response(GObject *source, GAsyncResult *result, gpointer us
         return;
     }
 
+    /* Reset retry counter on successful response */
+    data->auth_retry_count = 0;
+
     gsize size;
     const gchar *body = g_bytes_get_data(bytes, &size);
 
@@ -423,6 +490,14 @@ static void on_usage_response(GObject *source, GAsyncResult *result, gpointer us
         /* Clear any previous error state on successful parse */
         data->has_credentials_error = FALSE;
         JsonNode *root = json_parser_get_root(parser);
+
+        /* Validate root is an object */
+        if (!JSON_NODE_HOLDS_OBJECT(root)) {
+            g_object_unref(parser);
+            g_bytes_unref(bytes);
+            return;
+        }
+
         JsonObject *obj = json_node_get_object(root);
 
         JsonObject *five_hour = json_object_get_object_member(obj, "five_hour");
@@ -436,6 +511,7 @@ static void on_usage_response(GObject *source, GAsyncResult *result, gpointer us
                 GDateTime *reset_dt = g_date_time_new_from_iso8601(reset, NULL);
                 if (reset_dt) {
                     GDateTime *now = g_date_time_new_now_local();
+                    GDateTime *reset_local = g_date_time_to_local(reset_dt);
                     GTimeSpan diff = g_date_time_difference(reset_dt, now);
                     gint hours = diff / G_TIME_SPAN_HOUR;
                     gint mins = (diff % G_TIME_SPAN_HOUR) / G_TIME_SPAN_MINUTE;
@@ -447,6 +523,11 @@ static void on_usage_response(GObject *source, GAsyncResult *result, gpointer us
                         data->five_hour_reset_str = g_strdup_printf("(%dm)", mins);
                     }
 
+                    /* Store full reset time for tooltip */
+                    g_free(data->five_hour_reset_time);
+                    data->five_hour_reset_time = g_date_time_format(reset_local, "%l:%M %p");
+
+                    g_date_time_unref(reset_local);
                     g_date_time_unref(reset_dt);
                     g_date_time_unref(now);
                 }
@@ -461,6 +542,7 @@ static void on_usage_response(GObject *source, GAsyncResult *result, gpointer us
                 GDateTime *reset_dt = g_date_time_new_from_iso8601(reset, NULL);
                 if (reset_dt) {
                     GDateTime *now = g_date_time_new_now_local();
+                    GDateTime *reset_local = g_date_time_to_local(reset_dt);
                     GTimeSpan diff = g_date_time_difference(reset_dt, now);
                     gint days = diff / G_TIME_SPAN_DAY;
                     gint hours = (diff % G_TIME_SPAN_DAY) / G_TIME_SPAN_HOUR;
@@ -472,11 +554,22 @@ static void on_usage_response(GObject *source, GAsyncResult *result, gpointer us
                         data->seven_day_reset_str = g_strdup_printf("(%dh)", hours);
                     }
 
+                    /* Store full reset time for tooltip */
+                    g_free(data->seven_day_reset_time);
+                    data->seven_day_reset_time = g_date_time_format(reset_local, "%a %l:%M %p");
+
+                    g_date_time_unref(reset_local);
                     g_date_time_unref(reset_dt);
                     g_date_time_unref(now);
                 }
             }
         }
+
+        /* Update last updated time */
+        if (data->last_updated) {
+            g_date_time_unref(data->last_updated);
+        }
+        data->last_updated = g_date_time_new_now_local();
     }
 
     g_object_unref(parser);
@@ -509,8 +602,8 @@ static void claude_status_fetch_usage(ClaudeStatusPlugin *data) {
     soup_message_headers_append(headers, "User-Agent", "xfce-claude-status/0.1");
     g_free(auth);
 
-    soup_session_send_and_read_async(data->session, msg, G_PRIORITY_DEFAULT, NULL,
-                                      on_usage_response, data);
+    soup_session_send_and_read_async(data->session, msg, G_PRIORITY_DEFAULT,
+                                      data->cancellable, on_usage_response, data);
     g_object_unref(msg);
 }
 
@@ -561,6 +654,54 @@ static gboolean claude_status_update(ClaudeStatusPlugin *data) {
     g_free(pct7);
 
     update_label(data, data->seven_day_reset, data->seven_day_reset_str ? data->seven_day_reset_str : "", "#666", FALSE);
+
+    /* Update tooltip */
+    GString *tooltip = g_string_new("");
+
+    /* Plan name */
+    g_string_append_printf(tooltip, "<b>Claude %s</b>\n",
+                           data->plan_name ? data->plan_name : "—");
+    g_string_append(tooltip, "─────────────────\n");
+
+    /* 5-hour usage */
+    g_string_append_printf(tooltip, "5-hour:  %.1f%%", data->five_hour_pct_val);
+    if (data->five_hour_reset_time) {
+        g_string_append_printf(tooltip, " (resets%s)", data->five_hour_reset_time);
+    }
+    g_string_append(tooltip, "\n");
+
+    /* 7-day usage */
+    g_string_append_printf(tooltip, "7-day:   %.1f%%", data->seven_day_pct_val);
+    if (data->seven_day_reset_time) {
+        g_string_append_printf(tooltip, " (resets %s)", data->seven_day_reset_time);
+    }
+    g_string_append(tooltip, "\n");
+
+    /* Context usage */
+    if (data->context_window_size > 0) {
+        /* Format with thousands separators using GLib */
+        gchar *tokens_str = g_strdup_printf("%ld", (long)data->context_tokens);
+        gchar *window_str = g_strdup_printf("%ld", (long)data->context_window_size);
+        g_string_append_printf(tooltip, "Context: %s / %s tokens (%.0f%%)\n",
+                               tokens_str, window_str, data->context_pct);
+        g_free(tokens_str);
+        g_free(window_str);
+    }
+
+    /* Model name */
+    if (data->model_name) {
+        g_string_append_printf(tooltip, "\nModel: %s", data->model_name);
+    }
+
+    /* Last updated time */
+    if (data->last_updated) {
+        gchar *updated_str = g_date_time_format(data->last_updated, "%l:%M:%S %p");
+        g_string_append_printf(tooltip, "\nUpdated:%s", updated_str);
+        g_free(updated_str);
+    }
+
+    gtk_widget_set_tooltip_markup(data->box, tooltip->str);
+    g_string_free(tooltip, TRUE);
 
     return TRUE;
 }
@@ -1029,6 +1170,7 @@ static void claude_status_construct(XfcePanelPlugin *plugin) {
     ClaudeStatusPlugin *data = g_new0(ClaudeStatusPlugin, 1);
     data->plugin = plugin;
     data->session = soup_session_new();
+    data->cancellable = g_cancellable_new();
     data->five_hour_reset_str = g_strdup("");
     data->seven_day_reset_str = g_strdup("");
 
@@ -1080,6 +1222,12 @@ static void claude_status_free(XfcePanelPlugin *plugin, ClaudeStatusPlugin *data
         g_source_remove(data->timeout_id);
     }
 
+    /* Cancel any in-flight HTTP requests */
+    if (data->cancellable) {
+        g_cancellable_cancel(data->cancellable);
+        g_clear_object(&data->cancellable);
+    }
+
     if (data->creds_monitor) {
         g_file_monitor_cancel(data->creds_monitor);
         g_clear_object(&data->creds_monitor);
@@ -1090,7 +1238,13 @@ static void claude_status_free(XfcePanelPlugin *plugin, ClaudeStatusPlugin *data
     g_free(data->plan_name);
     g_free(data->five_hour_reset_str);
     g_free(data->seven_day_reset_str);
+    g_free(data->five_hour_reset_time);
+    g_free(data->seven_day_reset_time);
+    g_free(data->model_name);
     g_free(data->creds_file);
+    if (data->last_updated) {
+        g_date_time_unref(data->last_updated);
+    }
     g_free(data);
 }
 

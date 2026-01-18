@@ -22,13 +22,12 @@ jobs:
             libjson-glib-dev libsoup-3.0-dev git
 
       - name: Checkout
-        uses: actions/checkout@v4
+        run: |
+          git clone --depth=1 $GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git .
+          git checkout $GITHUB_SHA
 
       - name: Build package
         run: dpkg-buildpackage -us -uc -b
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: debian-package
-          path: ../*.deb
+      - name: List built packages
+        run: ls -la ../*.deb

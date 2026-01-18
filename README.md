@@ -4,6 +4,8 @@ Native XFCE panel plugin showing Claude Max/Pro rate limit usage.
 
 ![Screenshot](screenshot.png)
 
+Written with the help of Claude Code! Warning, this program has not been comprehensively tested. Please report any problems in the issue tracker.
+
 ## Features
 
 - **5-hour rate limit** - Progress bar with time until reset

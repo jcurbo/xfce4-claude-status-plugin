@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head><title>xfce4-claude-status-plugin apt repository</title></head>
+<body>
+<h1>xfce4-claude-status-plugin apt repository</h1>
+<h2>Installation</h2>
+<pre>
+# Add the repository (choose your Debian version)
+
+# For Debian Bookworm (stable):
+echo "deb [trusted=yes] https://jcurbo.github.io/xfce4-claude-status-plugin stable main" | sudo tee /etc/apt/sources.list.d/claude-status.list
+
+# For Debian Trixie (testing):
+echo "deb [trusted=yes] https://jcurbo.github.io/xfce4-claude-status-plugin testing main" | sudo tee /etc/apt/sources.list.d/claude-status.list
+
+# For Debian Sid (unstable):
+echo "deb [trusted=yes] https://jcurbo.github.io/xfce4-claude-status-plugin unstable main" | sudo tee /etc/apt/sources.list.d/claude-status.list
+
+# Update and install
+sudo apt update
+sudo apt install xfce4-claude-status-plugin
+</pre>
+<p>You can also use codenames directly: bookworm, trixie, sid</p>
+<h2>Available packages</h2>
+<ul>
+<li><a href="dists/stable/">stable</a> (bookworm)</li>
+<li><a href="dists/testing/">testing</a> (trixie)</li>
+<li><a href="dists/unstable/">unstable</a> (sid)</li>
+</ul>
+</body>
+</html>

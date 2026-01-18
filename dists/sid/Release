@@ -1,0 +1,13 @@
+Origin: jcurbo
+Label: xfce4-claude-status-plugin
+Suite: unstable
+Codename: sid
+Architectures: amd64
+Components: main
+Description: XFCE4 Claude Status Plugin apt repository
+MD5Sum:
+ 1b71fff65a680f95224a86c404ea309a 1514 main/binary-amd64/Packages
+ 1d46c2b895ff2b6f1877a966ce6ca3ea 759 main/binary-amd64/Packages.gz
+SHA256:
+ 753e99208aaf6794dd3ee1c37540803e039a1c4fbd5df6dec6194dce9eca7f29 1514 main/binary-amd64/Packages
+ dbd6fdef203a56d9269597509f1e085a716a020b1d5dc67b3c7f0869227a548a 759 main/binary-amd64/Packages.gz

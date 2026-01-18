@@ -1,0 +1,13 @@
+Origin: jcurbo
+Label: xfce4-claude-status-plugin
+Suite: stable
+Codename: bookworm
+Architectures: amd64
+Components: main
+Description: XFCE4 Claude Status Plugin apt repository
+MD5Sum:
+ 5968b4fabf8efe0058e8e51e75d2a1bd 1518 main/binary-amd64/Packages
+ 2b31f6d802b07a170f9f70a8320bd104 756 main/binary-amd64/Packages.gz
+SHA256:
+ 83e71a309a5ef9f5704cf3dcb1444dcf15b1501f8a0e0dab0eace37b12898dd5 1518 main/binary-amd64/Packages
+ 84bb9dc4a8f97bf959b6e83354d58276506c76323c56e3cc7d915862f31b66ca 756 main/binary-amd64/Packages.gz

@@ -1,0 +1,13 @@
+Origin: jcurbo
+Label: xfce4-claude-status-plugin
+Suite: testing
+Codename: trixie
+Architectures: amd64
+Components: main
+Description: XFCE4 Claude Status Plugin apt repository
+MD5Sum:
+ 9b5a7248094cfd0383798daf92ad9e68 1520 main/binary-amd64/Packages
+ 083f0ed1a5ac206d059da110ae6013ff 759 main/binary-amd64/Packages.gz
+SHA256:
+ ecfb3ecb8a5efacd214f59779fad2e4b400bc0840bf5e20c86b2d0e6addaa598 1520 main/binary-amd64/Packages
+ f8d710e469a795feb3a34093c366d123f001ae80c6305542357bd35efe485414 759 main/binary-amd64/Packages.gz

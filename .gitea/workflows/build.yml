@@ -23,11 +23,8 @@ jobs:
 
       - name: Checkout
         run: |
-          # Use host.docker.internal or the actual host IP for container access
-          REPO_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          # Replace localhost with host.docker.internal for Docker container access
-          REPO_URL=$(echo "$REPO_URL" | sed 's/localhost/host.docker.internal/g')
-          git clone --depth=1 "$REPO_URL" .
+          # Clone from Gitea - GITHUB_SERVER_URL should now have the correct IP
+          git clone --depth=1 "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" .
           git checkout $GITHUB_SHA
 
       - name: Build package

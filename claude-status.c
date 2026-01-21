@@ -614,12 +614,12 @@ static gboolean claude_status_update(ClaudeStatusPlugin *data) {
     /* Show error state if no credentials */
     if (data->has_credentials_error) {
         update_label(data, data->plan_label, "No creds", "#d75f5f", TRUE);
-        update_label(data, data->five_hour_bar, "Login to", "#888", FALSE);
+        update_label(data, data->five_hour_bar, "", "#888", FALSE);
         update_label(data, data->five_hour_pct, "", "#888", FALSE);
         update_label(data, data->five_hour_reset, "", "#666", FALSE);
-        update_label(data, data->ctx_label, "Claude Code", "#888", FALSE);
-        update_label(data, data->seven_day_bar, "first", "#888", FALSE);
-        update_label(data, data->seven_day_pct, "", "#888", FALSE);
+        update_label(data, data->ctx_label, "Run:", "#888", FALSE);
+        update_label(data, data->seven_day_bar, "claude", "#d4a574", FALSE);
+        update_label(data, data->seven_day_pct, "login", "#d4a574", FALSE);
         update_label(data, data->seven_day_reset, "", "#666", FALSE);
         return TRUE;
     }

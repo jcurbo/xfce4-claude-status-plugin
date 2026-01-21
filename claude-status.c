@@ -8,17 +8,9 @@
 
 #include <libxfce4panel/libxfce4panel.h>
 #include <libxfce4ui/libxfce4ui.h>
-#include <json-glib/json-glib.h>
-#include <libsoup/soup.h>
-#include <stdio.h>
-#include <string.h>
 #include <time.h>
-#include <dirent.h>
-#include <sys/stat.h>
 
-/* Context window sizes by model (in tokens) */
-#define CONTEXT_WINDOW_DEFAULT 200000
-#define CONTEXT_WINDOW_1M 1000000
+#include "claude_status_core.h"
 
 /* Default configuration values */
 #define DEFAULT_UPDATE_INTERVAL 30
@@ -49,23 +41,22 @@ typedef struct {
     GtkWidget *seven_day_pct;
     GtkWidget *seven_day_reset;
 
-    /* HTTP session */
-    SoupSession *session;
+    /* Rust core handle */
+    struct ClaudeStatusCore *core;
 
-    /* Cached data */
-    gchar *access_token;
+    /* Cached display data */
     gchar *plan_name;
     gdouble five_hour_pct_val;
     gdouble seven_day_pct_val;
     gchar *five_hour_reset_str;
     gchar *seven_day_reset_str;
-    gchar *five_hour_reset_time;   /* Full reset time for tooltip */
-    gchar *seven_day_reset_time;   /* Full reset time for tooltip */
+    gchar *five_hour_reset_time;
+    gchar *seven_day_reset_time;
     gdouble context_pct;
-    gint64 context_tokens;         /* Actual token count */
-    gint64 context_window_size;    /* Context window size */
-    gchar *model_name;             /* Current model name */
-    GDateTime *last_updated;       /* Last successful update time */
+    gint64 context_tokens;
+    gint64 context_window_size;
+    gchar *model_name;
+    GDateTime *last_updated;
 
     /* Configuration */
     gint update_interval;
@@ -76,21 +67,15 @@ typedef struct {
 
     /* Layout state */
     gboolean single_row;
-    gint font_size;  /* in Pango units (1000 = 1pt) */
+    gint font_size;
 
     /* Update timer */
     guint timeout_id;
 
-    /* Credentials file monitor */
-    GFileMonitor *creds_monitor;
-
     /* Error state */
     gboolean has_credentials_error;
 
-    /* HTTP request cancellation */
-    GCancellable *cancellable;
-
-    /* Retry counter for 401 errors */
+    /* Retry counter for auth errors */
     gint auth_retry_count;
 } ClaudeStatusPlugin;
 
@@ -98,14 +83,11 @@ typedef struct {
 static void claude_status_free(XfcePanelPlugin *plugin, ClaudeStatusPlugin *data);
 static gboolean claude_status_update(ClaudeStatusPlugin *data);
 static void claude_status_fetch_usage(ClaudeStatusPlugin *data);
-static void claude_status_read_context(ClaudeStatusPlugin *data);
 static void claude_status_save_config(ClaudeStatusPlugin *data);
 static void claude_status_read_config(ClaudeStatusPlugin *data);
 static void claude_status_configure(XfcePanelPlugin *plugin, ClaudeStatusPlugin *data);
 static void claude_status_rebuild_ui(ClaudeStatusPlugin *data);
 static void claude_status_size_changed(XfcePanelPlugin *plugin, gint size, ClaudeStatusPlugin *data);
-static void claude_status_setup_creds_monitor(ClaudeStatusPlugin *data);
-static gboolean load_credentials(ClaudeStatusPlugin *data);
 
 /* Expand ~ to home directory in path */
 static gchar* expand_path(const gchar *path) {
@@ -131,12 +113,9 @@ static gchar* make_bar(gdouble pct, int width) {
     return g_string_free(bar, FALSE);
 }
 
-/* Get color based on percentage and thresholds */
-static const gchar* get_color(const ClaudeStatusPlugin *data, gdouble pct) {
-    if (pct < data->yellow_threshold) return "#5faf5f";  /* green */
-    if (pct < data->orange_threshold) return "#d7af5f";  /* yellow */
-    if (pct < data->red_threshold) return "#d78700";     /* orange */
-    return "#d75f5f";                                     /* red */
+/* Get color based on percentage - uses Rust core */
+static const gchar* get_color(ClaudeStatusPlugin *data, gdouble pct) {
+    return claude_status_core_get_color(data->core, pct);
 }
 
 /* Load CSS styling */
@@ -193,390 +172,160 @@ static void update_label(ClaudeStatusPlugin *data, GtkWidget *label, const gchar
     g_free(markup);
 }
 
-/* Read credentials from Claude Code config */
-static gboolean load_credentials(ClaudeStatusPlugin *data) {
-    g_free(data->access_token);
-    g_free(data->plan_name);
-    data->access_token = NULL;
-    data->plan_name = NULL;
+/* Format reset time string from Unix timestamp */
+static gchar* format_five_hour_reset(gint64 reset_ts, gchar **full_time_out) {
+    GDateTime *reset_dt = g_date_time_new_from_unix_utc(reset_ts);
+    if (!reset_dt) return g_strdup("");
 
-    gchar *path = expand_path(data->creds_file ? data->creds_file : DEFAULT_CREDS_FILE);
-    gchar *contents = NULL;
-    gsize length;
+    GDateTime *now = g_date_time_new_now_utc();
+    GDateTime *reset_local = g_date_time_to_local(reset_dt);
+    GTimeSpan diff = g_date_time_difference(reset_dt, now);
+    gint hours = diff / G_TIME_SPAN_HOUR;
+    gint mins = (diff % G_TIME_SPAN_HOUR) / G_TIME_SPAN_MINUTE;
 
-    if (!g_file_get_contents(path, &contents, &length, NULL)) {
-        g_free(path);
-        return FALSE;
-    }
-    g_free(path);
-
-    JsonParser *parser = json_parser_new();
-    if (!json_parser_load_from_data(parser, contents, length, NULL)) {
-        g_free(contents);
-        g_object_unref(parser);
-        return FALSE;
-    }
-    g_free(contents);
-
-    JsonNode *root = json_parser_get_root(parser);
-    if (!JSON_NODE_HOLDS_OBJECT(root)) {
-        g_object_unref(parser);
-        return FALSE;
+    gchar *result;
+    if (hours > 0) {
+        result = g_strdup_printf("(%dh %dm)", hours, mins);
+    } else {
+        result = g_strdup_printf("(%dm)", mins);
     }
 
-    JsonObject *obj = json_node_get_object(root);
-    if (!json_object_has_member(obj, "claudeAiOauth")) {
-        g_object_unref(parser);
-        return FALSE;
+    if (full_time_out) {
+        *full_time_out = g_date_time_format(reset_local, "%l:%M %p");
     }
 
-    JsonObject *oauth = json_object_get_object_member(obj, "claudeAiOauth");
-    if (!oauth) {
-        g_object_unref(parser);
-        return FALSE;
-    }
+    g_date_time_unref(reset_local);
+    g_date_time_unref(reset_dt);
+    g_date_time_unref(now);
 
-    const gchar *token = json_object_get_string_member(oauth, "accessToken");
-    const gchar *sub_type = json_object_get_string_member(oauth, "subscriptionType");
-
-    if (token) {
-        data->access_token = g_strdup(token);
-    }
-
-    if (sub_type) {
-        if (g_strstr_len(sub_type, -1, "max")) {
-            data->plan_name = g_strdup("Max");
-        } else if (g_strstr_len(sub_type, -1, "pro")) {
-            data->plan_name = g_strdup("Pro");
-        }
-    }
-
-    g_object_unref(parser);
-    return data->access_token != NULL;
+    return result;
 }
 
-/* Callback when credentials file changes */
-static void on_creds_file_changed(GFileMonitor *monitor, GFile *file, GFile *other_file,
-                                   GFileMonitorEvent event_type, gpointer user_data) {
+static gchar* format_seven_day_reset(gint64 reset_ts, gchar **full_time_out) {
+    GDateTime *reset_dt = g_date_time_new_from_unix_utc(reset_ts);
+    if (!reset_dt) return g_strdup("");
+
+    GDateTime *now = g_date_time_new_now_utc();
+    GDateTime *reset_local = g_date_time_to_local(reset_dt);
+    GTimeSpan diff = g_date_time_difference(reset_dt, now);
+    gint days = diff / G_TIME_SPAN_DAY;
+    gint hours = (diff % G_TIME_SPAN_DAY) / G_TIME_SPAN_HOUR;
+
+    gchar *result;
+    if (days > 0) {
+        result = g_strdup_printf("(%dd %dh)", days, hours);
+    } else {
+        result = g_strdup_printf("(%dh)", hours);
+    }
+
+    if (full_time_out) {
+        *full_time_out = g_date_time_format(reset_local, "%a %l:%M %p");
+    }
+
+    g_date_time_unref(reset_local);
+    g_date_time_unref(reset_dt);
+    g_date_time_unref(now);
+
+    return result;
+}
+
+/* Fetch usage from Rust core (runs in thread pool) */
+static void fetch_usage_thread(GTask *task, gpointer source_object,
+                                gpointer task_data, GCancellable *cancellable) {
+    ClaudeStatusPlugin *data = task_data;
+
+    /* Load credentials if needed */
+    enum CResultCode cred_result = claude_status_core_load_credentials(
+        data->core, data->creds_file);
+
+    if (cred_result != Ok) {
+        g_task_return_int(task, cred_result);
+        return;
+    }
+
+    /* Fetch usage */
+    enum CResultCode usage_result = claude_status_core_fetch_usage(data->core);
+    if (usage_result != Ok) {
+        g_task_return_int(task, usage_result);
+        return;
+    }
+
+    /* Read context */
+    claude_status_core_read_context(data->core);
+
+    g_task_return_int(task, Ok);
+}
+
+static void fetch_usage_done(GObject *source_object, GAsyncResult *result, gpointer user_data) {
     ClaudeStatusPlugin *data = user_data;
+    GTask *task = G_TASK(result);
 
-    if (event_type == G_FILE_MONITOR_EVENT_CHANGED ||
-        event_type == G_FILE_MONITOR_EVENT_CREATED) {
-        /* Reload credentials and fetch new data */
-        if (load_credentials(data)) {
-            data->has_credentials_error = FALSE;
-            claude_status_fetch_usage(data);
-        }
-    }
-}
+    enum CResultCode code = g_task_propagate_int(task, NULL);
 
-/* Set up file monitor for credentials file */
-static void claude_status_setup_creds_monitor(ClaudeStatusPlugin *data) {
-    /* Cancel existing monitor if any */
-    if (data->creds_monitor) {
-        g_file_monitor_cancel(data->creds_monitor);
-        g_clear_object(&data->creds_monitor);
-    }
-
-    gchar *path = expand_path(data->creds_file ? data->creds_file : DEFAULT_CREDS_FILE);
-    GFile *file = g_file_new_for_path(path);
-    g_free(path);
-
-    GError *error = NULL;
-    data->creds_monitor = g_file_monitor_file(file, G_FILE_MONITOR_NONE, NULL, &error);
-    g_object_unref(file);
-
-    if (error) {
-        g_error_free(error);
-        return;
-    }
-
-    if (data->creds_monitor) {
-        g_signal_connect(data->creds_monitor, "changed",
-                         G_CALLBACK(on_creds_file_changed), data);
-    }
-}
-
-/* Find the most recently modified transcript file */
-static gchar* find_latest_transcript(void) {
-    gchar *projects_dir = g_build_filename(g_get_home_dir(), ".claude", "projects", NULL);
-    DIR *dir = opendir(projects_dir);
-    if (!dir) {
-        g_free(projects_dir);
-        return NULL;
-    }
-
-    gchar *latest_path = NULL;
-    time_t latest_mtime = 0;
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_name[0] == '.') continue;
-
-        gchar *project_path = g_build_filename(projects_dir, entry->d_name, NULL);
-        DIR *project_dir = opendir(project_path);
-        if (!project_dir) {
-            g_free(project_path);
-            continue;
-        }
-
-        struct dirent *file_entry;
-        while ((file_entry = readdir(project_dir)) != NULL) {
-            if (!g_str_has_suffix(file_entry->d_name, ".jsonl")) continue;
-
-            gchar *file_path = g_build_filename(project_path, file_entry->d_name, NULL);
-            struct stat st;
-            if (stat(file_path, &st) == 0 && st.st_mtime > latest_mtime) {
-                latest_mtime = st.st_mtime;
-                g_free(latest_path);
-                latest_path = file_path;
-            } else {
-                g_free(file_path);
-            }
-        }
-        closedir(project_dir);
-        g_free(project_path);
-    }
-    closedir(dir);
-    g_free(projects_dir);
-
-    return latest_path;
-}
-
-/* Get context window size for a model name */
-static gint64 get_context_window_for_model(const gchar *model) {
-    if (!model) return CONTEXT_WINDOW_DEFAULT;
-
-    /* Sonnet 4 and 4.5 can have 1M context in beta for tier 4 orgs,
-     * but consumer OAuth users get 200K. Default to 200K for safety.
-     * This could be made configurable if users have 1M access. */
-    return CONTEXT_WINDOW_DEFAULT;
-}
-
-/* Read context window usage from transcript */
-static void claude_status_read_context(ClaudeStatusPlugin *data) {
-    gchar *transcript_path = find_latest_transcript();
-    if (!transcript_path) {
-        data->context_pct = 0;
-        return;
-    }
-
-    FILE *f = fopen(transcript_path, "r");
-    g_free(transcript_path);
-    if (!f) {
-        data->context_pct = 0;
-        return;
-    }
-
-    /* We want the LAST assistant message's input_tokens and model */
-    gint64 last_input = 0;
-    gint64 last_cache_creation = 0;
-    gint64 last_cache_read = 0;
-    gchar *last_model = NULL;
-
-    char *line = NULL;
-    size_t len = 0;
-
-    while (getline(&line, &len, f) != -1) {
-        JsonParser *parser = json_parser_new();
-        if (!json_parser_load_from_data(parser, line, -1, NULL)) {
-            g_object_unref(parser);
-            continue;
-        }
-
-        JsonNode *root = json_parser_get_root(parser);
-        if (!JSON_NODE_HOLDS_OBJECT(root)) {
-            g_object_unref(parser);
-            continue;
-        }
-
-        JsonObject *obj = json_node_get_object(root);
-        const gchar *type = json_object_get_string_member(obj, "type");
-
-        if (type && g_strcmp0(type, "assistant") == 0) {
-            JsonObject *message = json_object_get_object_member(obj, "message");
-            if (message) {
-                /* Get the model name */
-                const gchar *model = json_object_get_string_member(message, "model");
-                if (model) {
-                    g_free(last_model);
-                    last_model = g_strdup(model);
-                }
-
-                JsonObject *usage = json_object_get_object_member(message, "usage");
-                if (usage) {
-                    /* Get the latest values - input_tokens + cache tokens = total context */
-                    last_input = json_object_get_int_member(usage, "input_tokens");
-                    last_cache_creation = json_object_get_int_member(usage, "cache_creation_input_tokens");
-                    last_cache_read = json_object_get_int_member(usage, "cache_read_input_tokens");
-                }
-            }
-        }
-
-        g_object_unref(parser);
-    }
-
-    free(line);
-    fclose(f);
-
-    /* Total context = input + cache_creation + cache_read */
-    gint64 total_context = last_input + last_cache_creation + last_cache_read;
-    gint64 context_window = get_context_window_for_model(last_model);
-
-    /* Store values for tooltip */
-    data->context_tokens = total_context;
-    data->context_window_size = context_window;
-    g_free(data->model_name);
-    data->model_name = last_model;  /* Transfer ownership */
-
-    data->context_pct = (gdouble)total_context / context_window * 100.0;
-    if (data->context_pct > 100) data->context_pct = 100;
-}
-
-/* HTTP response callback */
-static void on_usage_response(GObject *source, GAsyncResult *result, gpointer user_data) {
-    ClaudeStatusPlugin *data = user_data;
-    GError *error = NULL;
-
-    /* Get the message to check status code */
-    SoupMessage *msg = soup_session_get_async_result_message(SOUP_SESSION(source), result);
-    GBytes *bytes = soup_session_send_and_read_finish(SOUP_SESSION(source), result, &error);
-
-    if (error) {
-        /* Check if cancelled (plugin being freed) */
-        if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-            g_error_free(error);
-            return;
-        }
-        g_error_free(error);
-        return;
-    }
-
-    /* Check for 401 Unauthorized - token may have been refreshed */
-    if (msg && soup_message_get_status(msg) == 401) {
-        g_bytes_unref(bytes);
-
-        /* Limit retries to prevent infinite loop */
+    if (code == AuthError) {
+        /* Handle auth error with retry */
         if (data->auth_retry_count >= 2) {
             data->auth_retry_count = 0;
             data->has_credentials_error = TRUE;
             claude_status_update(data);
             return;
         }
-
         data->auth_retry_count++;
-
-        /* Clear cached token and try to reload credentials */
-        g_free(data->access_token);
-        data->access_token = NULL;
-        if (load_credentials(data)) {
-            /* Retry the request with new credentials */
-            claude_status_fetch_usage(data);
-        } else {
-            data->has_credentials_error = TRUE;
-            claude_status_update(data);
-        }
+        /* Retry */
+        claude_status_fetch_usage(data);
         return;
     }
 
-    /* Reset retry counter on successful response */
     data->auth_retry_count = 0;
 
-    gsize size;
-    const gchar *body = g_bytes_get_data(bytes, &size);
-
-    JsonParser *parser = json_parser_new();
-    if (json_parser_load_from_data(parser, body, size, NULL)) {
-        /* Clear any previous error state on successful parse */
-        data->has_credentials_error = FALSE;
-        JsonNode *root = json_parser_get_root(parser);
-
-        /* Validate root is an object */
-        if (!JSON_NODE_HOLDS_OBJECT(root)) {
-            g_object_unref(parser);
-            g_bytes_unref(bytes);
-            return;
-        }
-
-        JsonObject *obj = json_node_get_object(root);
-
-        JsonObject *five_hour = json_object_get_object_member(obj, "five_hour");
-        JsonObject *seven_day = json_object_get_object_member(obj, "seven_day");
-
-        if (five_hour) {
-            data->five_hour_pct_val = json_object_get_double_member(five_hour, "utilization");
-
-            const gchar *reset = json_object_get_string_member(five_hour, "resets_at");
-            if (reset) {
-                GDateTime *reset_dt = g_date_time_new_from_iso8601(reset, NULL);
-                if (reset_dt) {
-                    GDateTime *now = g_date_time_new_now_local();
-                    GDateTime *reset_local = g_date_time_to_local(reset_dt);
-                    GTimeSpan diff = g_date_time_difference(reset_dt, now);
-                    gint hours = diff / G_TIME_SPAN_HOUR;
-                    gint mins = (diff % G_TIME_SPAN_HOUR) / G_TIME_SPAN_MINUTE;
-
-                    g_free(data->five_hour_reset_str);
-                    if (hours > 0) {
-                        data->five_hour_reset_str = g_strdup_printf("(%dh %dm)", hours, mins);
-                    } else {
-                        data->five_hour_reset_str = g_strdup_printf("(%dm)", mins);
-                    }
-
-                    /* Store full reset time for tooltip */
-                    g_free(data->five_hour_reset_time);
-                    data->five_hour_reset_time = g_date_time_format(reset_local, "%l:%M %p");
-
-                    g_date_time_unref(reset_local);
-                    g_date_time_unref(reset_dt);
-                    g_date_time_unref(now);
-                }
-            }
-        }
-
-        if (seven_day) {
-            data->seven_day_pct_val = json_object_get_double_member(seven_day, "utilization");
-
-            const gchar *reset = json_object_get_string_member(seven_day, "resets_at");
-            if (reset) {
-                GDateTime *reset_dt = g_date_time_new_from_iso8601(reset, NULL);
-                if (reset_dt) {
-                    GDateTime *now = g_date_time_new_now_local();
-                    GDateTime *reset_local = g_date_time_to_local(reset_dt);
-                    GTimeSpan diff = g_date_time_difference(reset_dt, now);
-                    gint days = diff / G_TIME_SPAN_DAY;
-                    gint hours = (diff % G_TIME_SPAN_DAY) / G_TIME_SPAN_HOUR;
-
-                    g_free(data->seven_day_reset_str);
-                    if (days > 0) {
-                        data->seven_day_reset_str = g_strdup_printf("(%dd %dh)", days, hours);
-                    } else {
-                        data->seven_day_reset_str = g_strdup_printf("(%dh)", hours);
-                    }
-
-                    /* Store full reset time for tooltip */
-                    g_free(data->seven_day_reset_time);
-                    data->seven_day_reset_time = g_date_time_format(reset_local, "%a %l:%M %p");
-
-                    g_date_time_unref(reset_local);
-                    g_date_time_unref(reset_dt);
-                    g_date_time_unref(now);
-                }
-            }
-        }
-
-        /* Update last updated time */
-        if (data->last_updated) {
-            g_date_time_unref(data->last_updated);
-        }
-        data->last_updated = g_date_time_new_now_local();
+    if (code == NoCredentials || code == InvalidCredentials) {
+        data->has_credentials_error = TRUE;
+        claude_status_update(data);
+        return;
     }
 
-    g_object_unref(parser);
-    g_bytes_unref(bytes);
+    data->has_credentials_error = FALSE;
 
-    /* Also update context from transcript */
-    claude_status_read_context(data);
+    /* Get usage data from core */
+    struct CUsageData usage = claude_status_core_get_usage(data->core);
+    if (usage.valid) {
+        data->five_hour_pct_val = usage.five_hour_pct;
+        data->seven_day_pct_val = usage.seven_day_pct;
+
+        g_free(data->five_hour_reset_str);
+        g_free(data->five_hour_reset_time);
+        data->five_hour_reset_str = format_five_hour_reset(
+            usage.five_hour_reset_ts, &data->five_hour_reset_time);
+
+        g_free(data->seven_day_reset_str);
+        g_free(data->seven_day_reset_time);
+        data->seven_day_reset_str = format_seven_day_reset(
+            usage.seven_day_reset_ts, &data->seven_day_reset_time);
+    }
+
+    /* Get context info from core */
+    struct CContextInfo ctx = claude_status_core_get_context(data->core);
+    if (ctx.valid) {
+        data->context_pct = ctx.context_pct;
+        data->context_tokens = ctx.context_tokens;
+        data->context_window_size = ctx.context_window_size;
+
+        g_free(data->model_name);
+        data->model_name = ctx.model_name ? g_strdup(ctx.model_name) : NULL;
+    }
+
+    /* Get credentials info for plan name */
+    struct CCredentialsInfo creds = claude_status_core_get_credentials_info(data->core);
+    if (creds.valid) {
+        g_free(data->plan_name);
+        data->plan_name = creds.plan_name ? g_strdup(creds.plan_name) : NULL;
+    }
+
+    /* Update last updated time */
+    if (data->last_updated) {
+        g_date_time_unref(data->last_updated);
+    }
+    data->last_updated = g_date_time_new_now_local();
 
     /* Update UI */
     claude_status_update(data);
@@ -584,32 +333,15 @@ static void on_usage_response(GObject *source, GAsyncResult *result, gpointer us
 
 /* Fetch usage from API */
 static void claude_status_fetch_usage(ClaudeStatusPlugin *data) {
-    if (!data->access_token) {
-        if (!load_credentials(data)) {
-            data->has_credentials_error = TRUE;
-            claude_status_update(data);
-            return;
-        }
-        data->has_credentials_error = FALSE;
-    }
-
-    SoupMessage *msg = soup_message_new("GET", "https://api.anthropic.com/api/oauth/usage");
-    SoupMessageHeaders *headers = soup_message_get_request_headers(msg);
-
-    gchar *auth = g_strdup_printf("Bearer %s", data->access_token);
-    soup_message_headers_append(headers, "Authorization", auth);
-    soup_message_headers_append(headers, "anthropic-beta", "oauth-2025-04-20");
-    soup_message_headers_append(headers, "User-Agent", "xfce-claude-status/0.1");
-    g_free(auth);
-
-    soup_session_send_and_read_async(data->session, msg, G_PRIORITY_DEFAULT,
-                                      data->cancellable, on_usage_response, data);
-    g_object_unref(msg);
+    GTask *task = g_task_new(NULL, NULL, fetch_usage_done, data);
+    g_task_set_task_data(task, data, NULL);
+    g_task_run_in_thread(task, fetch_usage_thread);
+    g_object_unref(task);
 }
 
 /* Update the UI with current data */
 static gboolean claude_status_update(ClaudeStatusPlugin *data) {
-    if (!data->plan_label) return TRUE;  /* UI not built yet */
+    if (!data->plan_label) return TRUE;
 
     /* Show error state if no credentials */
     if (data->has_credentials_error) {
@@ -658,28 +390,23 @@ static gboolean claude_status_update(ClaudeStatusPlugin *data) {
     /* Update tooltip */
     GString *tooltip = g_string_new("");
 
-    /* Plan name */
     g_string_append_printf(tooltip, "<b>Claude %s</b>\n",
                            data->plan_name ? data->plan_name : "—");
     g_string_append(tooltip, "─────────────────\n");
 
-    /* 5-hour usage */
     g_string_append_printf(tooltip, "5-hour:  %.1f%%", data->five_hour_pct_val);
     if (data->five_hour_reset_time) {
         g_string_append_printf(tooltip, " (resets%s)", data->five_hour_reset_time);
     }
     g_string_append(tooltip, "\n");
 
-    /* 7-day usage */
     g_string_append_printf(tooltip, "7-day:   %.1f%%", data->seven_day_pct_val);
     if (data->seven_day_reset_time) {
         g_string_append_printf(tooltip, " (resets %s)", data->seven_day_reset_time);
     }
     g_string_append(tooltip, "\n");
 
-    /* Context usage */
     if (data->context_window_size > 0) {
-        /* Format with thousands separators using GLib */
         gchar *tokens_str = g_strdup_printf("%ld", (long)data->context_tokens);
         gchar *window_str = g_strdup_printf("%ld", (long)data->context_window_size);
         g_string_append_printf(tooltip, "Context: %s / %s tokens (%.0f%%)\n",
@@ -688,12 +415,10 @@ static gboolean claude_status_update(ClaudeStatusPlugin *data) {
         g_free(window_str);
     }
 
-    /* Model name */
     if (data->model_name) {
         g_string_append_printf(tooltip, "\nModel: %s", data->model_name);
     }
 
-    /* Last updated time */
     if (data->last_updated) {
         gchar *updated_str = g_date_time_format(data->last_updated, "%l:%M:%S %p");
         g_string_append_printf(tooltip, "\nUpdated:%s", updated_str);
@@ -706,9 +431,15 @@ static gboolean claude_status_update(ClaudeStatusPlugin *data) {
     return TRUE;
 }
 
-/* Timer callback - fetch new data periodically */
+/* Timer callback */
 static gboolean on_timeout(gpointer user_data) {
     ClaudeStatusPlugin *data = user_data;
+
+    /* Check if credentials file changed (from Rust monitor) */
+    if (claude_status_core_credentials_changed(data->core)) {
+        data->has_credentials_error = FALSE;
+    }
+
     claude_status_fetch_usage(data);
     return TRUE;
 }
@@ -738,6 +469,12 @@ static void claude_status_read_config(ClaudeStatusPlugin *data) {
             g_free(data->creds_file);
             data->creds_file = g_strdup(creds);
             xfce_rc_close(rc);
+
+            /* Update Rust core with thresholds */
+            claude_status_core_set_update_interval(data->core, data->update_interval);
+            claude_status_core_set_yellow_threshold(data->core, data->yellow_threshold);
+            claude_status_core_set_orange_threshold(data->core, data->orange_threshold);
+            claude_status_core_set_red_threshold(data->core, data->red_threshold);
             return;
         }
     }
@@ -749,6 +486,12 @@ static void claude_status_read_config(ClaudeStatusPlugin *data) {
     data->red_threshold = DEFAULT_RED_THRESHOLD;
     g_free(data->creds_file);
     data->creds_file = g_strdup(DEFAULT_CREDS_FILE);
+
+    /* Update Rust core with defaults */
+    claude_status_core_set_update_interval(data->core, data->update_interval);
+    claude_status_core_set_yellow_threshold(data->core, data->yellow_threshold);
+    claude_status_core_set_orange_threshold(data->core, data->orange_threshold);
+    claude_status_core_set_red_threshold(data->core, data->red_threshold);
 }
 
 /* Save configuration to rc file */
@@ -772,7 +515,6 @@ static void claude_status_save_config(ClaudeStatusPlugin *data) {
 
 /* Build the plugin UI based on current layout settings */
 static void claude_status_rebuild_ui(ClaudeStatusPlugin *data) {
-    /* Remove old grid if exists */
     if (data->grid) {
         gtk_widget_destroy(data->grid);
         data->grid = NULL;
@@ -788,7 +530,6 @@ static void claude_status_rebuild_ui(ClaudeStatusPlugin *data) {
         data->seven_day_reset = NULL;
     }
 
-    /* Grid for alignment */
     data->grid = gtk_grid_new();
     gtk_grid_set_column_spacing(GTK_GRID(data->grid), data->single_row ? 4 : 6);
     gtk_grid_set_row_spacing(GTK_GRID(data->grid), 2);
@@ -801,7 +542,6 @@ static void claude_status_rebuild_ui(ClaudeStatusPlugin *data) {
     gtk_container_add(GTK_CONTAINER(data->box), data->grid);
 
     if (data->single_row) {
-        /* Single row layout: Plan | 5h: bar pct | 7d: bar pct | Ctx:pct */
         data->plan_label = create_label(data, "—", "#d4a574", TRUE);
         gtk_grid_attach(GTK_GRID(data->grid), data->plan_label, 0, 0, 1, 1);
 
@@ -814,7 +554,6 @@ static void claude_status_rebuild_ui(ClaudeStatusPlugin *data) {
         data->five_hour_pct = create_label(data, "  0%", "#5faf5f", FALSE);
         gtk_grid_attach(GTK_GRID(data->grid), data->five_hour_pct, 3, 0, 1, 1);
 
-        /* Skip reset times in single row to save space */
         data->five_hour_reset = create_label(data, "", "#666", FALSE);
         gtk_widget_set_visible(data->five_hour_reset, FALSE);
 
@@ -833,8 +572,6 @@ static void claude_status_rebuild_ui(ClaudeStatusPlugin *data) {
         data->ctx_label = create_label(data, "Ctx:  0%", "#5faf5f", FALSE);
         gtk_grid_attach(GTK_GRID(data->grid), data->ctx_label, 7, 0, 1, 1);
     } else {
-        /* Two row layout */
-        /* Row 1: Plan | 5h: | bar | pct | reset */
         data->plan_label = create_label(data, "—", "#d4a574", TRUE);
         gtk_grid_attach(GTK_GRID(data->grid), data->plan_label, 0, 0, 1, 1);
 
@@ -850,7 +587,6 @@ static void claude_status_rebuild_ui(ClaudeStatusPlugin *data) {
         data->five_hour_reset = create_label(data, "", "#666", FALSE);
         gtk_grid_attach(GTK_GRID(data->grid), data->five_hour_reset, 4, 0, 1, 1);
 
-        /* Row 2: Ctx | 7d: | bar | pct | reset */
         data->ctx_label = create_label(data, "Ctx:  0%", "#5faf5f", FALSE);
         gtk_grid_attach(GTK_GRID(data->grid), data->ctx_label, 0, 1, 1, 1);
 
@@ -868,8 +604,6 @@ static void claude_status_rebuild_ui(ClaudeStatusPlugin *data) {
     }
 
     gtk_widget_show_all(data->grid);
-
-    /* Update with current values */
     claude_status_update(data);
 }
 
@@ -878,22 +612,20 @@ static void claude_status_size_changed(XfcePanelPlugin *plugin, gint size, Claud
     gboolean new_single_row;
     gint new_font_size;
 
-    /* Determine layout based on panel size */
     if (size < 30) {
         new_single_row = TRUE;
-        new_font_size = 6000;  /* 6pt */
+        new_font_size = 6000;
     } else if (size < 40) {
         new_single_row = TRUE;
-        new_font_size = 7000;  /* 7pt */
+        new_font_size = 7000;
     } else if (size < 50) {
         new_single_row = FALSE;
-        new_font_size = 8000;  /* 8pt */
+        new_font_size = 8000;
     } else {
         new_single_row = FALSE;
-        new_font_size = 9000;  /* 9pt */
+        new_font_size = 9000;
     }
 
-    /* Only rebuild if layout changed */
     if (new_single_row != data->single_row || new_font_size != data->font_size) {
         data->single_row = new_single_row;
         data->font_size = new_font_size;
@@ -901,91 +633,36 @@ static void claude_status_size_changed(XfcePanelPlugin *plugin, gint size, Claud
     }
 }
 
-/* Callback for update interval spin button */
+/* Configuration dialog callbacks */
 static void on_update_interval_changed(GtkSpinButton *btn, gpointer user_data) {
     ClaudeStatusPlugin *data = user_data;
     data->update_interval = gtk_spin_button_get_value_as_int(btn);
+    claude_status_core_set_update_interval(data->core, data->update_interval);
 }
 
-/* Callback for yellow threshold spin button */
 static void on_yellow_threshold_changed(GtkSpinButton *btn, gpointer user_data) {
     ClaudeStatusPlugin *data = user_data;
     data->yellow_threshold = gtk_spin_button_get_value_as_int(btn);
+    claude_status_core_set_yellow_threshold(data->core, data->yellow_threshold);
 }
 
-/* Callback for orange threshold spin button */
 static void on_orange_threshold_changed(GtkSpinButton *btn, gpointer user_data) {
     ClaudeStatusPlugin *data = user_data;
     data->orange_threshold = gtk_spin_button_get_value_as_int(btn);
+    claude_status_core_set_orange_threshold(data->core, data->orange_threshold);
 }
 
-/* Callback for red threshold spin button */
 static void on_red_threshold_changed(GtkSpinButton *btn, gpointer user_data) {
     ClaudeStatusPlugin *data = user_data;
     data->red_threshold = gtk_spin_button_get_value_as_int(btn);
+    claude_status_core_set_red_threshold(data->core, data->red_threshold);
 }
 
-/* Validate credentials file - check it exists and has required fields */
-static gboolean validate_creds_file(const gchar *path, gchar **error_msg) {
-    gchar *expanded = NULL;
-    if (path && path[0] == '~' && (path[1] == '/' || path[1] == '\0')) {
-        expanded = g_build_filename(g_get_home_dir(), path + 2, NULL);
-    } else {
-        expanded = g_strdup(path);
-    }
-
-    if (!expanded || !g_file_test(expanded, G_FILE_TEST_EXISTS)) {
-        if (error_msg) *error_msg = g_strdup("File does not exist");
-        g_free(expanded);
-        return FALSE;
-    }
-
-    gchar *contents = NULL;
-    gsize length;
-    if (!g_file_get_contents(expanded, &contents, &length, NULL)) {
-        if (error_msg) *error_msg = g_strdup("Cannot read file");
-        g_free(expanded);
-        return FALSE;
-    }
-    g_free(expanded);
-
-    JsonParser *parser = json_parser_new();
-    if (!json_parser_load_from_data(parser, contents, length, NULL)) {
-        if (error_msg) *error_msg = g_strdup("Invalid JSON");
-        g_free(contents);
-        g_object_unref(parser);
-        return FALSE;
-    }
-    g_free(contents);
-
-    JsonNode *root = json_parser_get_root(parser);
-    JsonObject *obj = json_node_get_object(root);
-    JsonObject *oauth = json_object_get_object_member(obj, "claudeAiOauth");
-
-    if (!oauth) {
-        if (error_msg) *error_msg = g_strdup("Missing claudeAiOauth section");
-        g_object_unref(parser);
-        return FALSE;
-    }
-
-    const gchar *token = json_object_get_string_member(oauth, "accessToken");
-    if (!token || strlen(token) == 0) {
-        if (error_msg) *error_msg = g_strdup("Missing accessToken");
-        g_object_unref(parser);
-        return FALSE;
-    }
-
-    g_object_unref(parser);
-    return TRUE;
-}
-
-/* Callback for file chooser button */
 static void on_creds_file_set(GtkFileChooserButton *button, gpointer user_data) {
     ClaudeStatusPlugin *data = user_data;
     gchar *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(button));
 
     if (filename) {
-        /* Convert to ~ format if in home directory */
         const gchar *home = g_get_home_dir();
         if (g_str_has_prefix(filename, home)) {
             gchar *relative = g_strdup_printf("~%s", filename + strlen(home));
@@ -999,31 +676,15 @@ static void on_creds_file_set(GtkFileChooserButton *button, gpointer user_data) 
     }
 }
 
-/* Configuration dialog response */
 static void on_configure_response(GtkDialog *dialog, gint response, ClaudeStatusPlugin *data) {
     if (response == GTK_RESPONSE_OK || response == GTK_RESPONSE_APPLY) {
-        /* Validate credentials file before saving */
-        gchar *error_msg = NULL;
-        if (!validate_creds_file(data->creds_file, &error_msg)) {
-            GtkWidget *msg_dialog = gtk_message_dialog_new(
-                GTK_WINDOW(dialog),
-                GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
-                GTK_MESSAGE_WARNING,
-                GTK_BUTTONS_OK,
-                "Credentials file validation failed:\n%s\n\nSettings will be saved, but the plugin may not work correctly.",
-                error_msg ? error_msg : "Unknown error");
-            gtk_dialog_run(GTK_DIALOG(msg_dialog));
-            gtk_widget_destroy(msg_dialog);
-            g_free(error_msg);
-        }
-
         claude_status_save_config(data);
         claude_status_restart_timer(data);
-        /* Re-setup file monitor in case creds file changed */
-        claude_status_setup_creds_monitor(data);
-        /* Clear cached token to force reload from new file */
-        g_free(data->access_token);
-        data->access_token = NULL;
+
+        /* Restart file monitor with new path */
+        claude_status_core_start_monitor(data->core, data->creds_file);
+
+        /* Trigger refresh */
         claude_status_fetch_usage(data);
     }
 
@@ -1122,19 +783,16 @@ static void claude_status_configure(XfcePanelPlugin *plugin, ClaudeStatusPlugin 
 
     file_chooser = gtk_file_chooser_button_new("Select Credentials File", GTK_FILE_CHOOSER_ACTION_OPEN);
 
-    /* Set current file if it exists */
     gchar *current_path = expand_path(data->creds_file ? data->creds_file : DEFAULT_CREDS_FILE);
     if (g_file_test(current_path, G_FILE_TEST_EXISTS)) {
         gtk_file_chooser_set_filename(GTK_FILE_CHOOSER(file_chooser), current_path);
     } else {
-        /* Set to home/.claude directory as starting point */
         gchar *claude_dir = g_build_filename(g_get_home_dir(), ".claude", NULL);
         gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(file_chooser), claude_dir);
         g_free(claude_dir);
     }
     g_free(current_path);
 
-    /* Add JSON file filter */
     GtkFileFilter *json_filter = gtk_file_filter_new();
     gtk_file_filter_set_name(json_filter, "JSON files (*.json)");
     gtk_file_filter_add_pattern(json_filter, "*.json");
@@ -1145,7 +803,6 @@ static void claude_status_configure(XfcePanelPlugin *plugin, ClaudeStatusPlugin 
     gtk_file_filter_add_pattern(all_filter, "*");
     gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(file_chooser), all_filter);
 
-    /* Show hidden files by default (credentials file starts with .) */
     gtk_file_chooser_set_show_hidden(GTK_FILE_CHOOSER(file_chooser), TRUE);
 
     g_signal_connect(file_chooser, "file-set", G_CALLBACK(on_creds_file_set), data);
@@ -1169,10 +826,11 @@ static void claude_status_configure(XfcePanelPlugin *plugin, ClaudeStatusPlugin 
 static void claude_status_construct(XfcePanelPlugin *plugin) {
     ClaudeStatusPlugin *data = g_new0(ClaudeStatusPlugin, 1);
     data->plugin = plugin;
-    data->session = soup_session_new();
-    data->cancellable = g_cancellable_new();
     data->five_hour_reset_str = g_strdup("");
     data->seven_day_reset_str = g_strdup("");
+
+    /* Create Rust core */
+    data->core = claude_status_core_new();
 
     /* Load configuration */
     claude_status_read_config(data);
@@ -1203,11 +861,10 @@ static void claude_status_construct(XfcePanelPlugin *plugin) {
     g_signal_connect(plugin, "configure-plugin", G_CALLBACK(claude_status_configure), data);
     g_signal_connect(plugin, "save", G_CALLBACK(claude_status_save_config), data);
 
-    /* Show configure in right-click menu */
     xfce_panel_plugin_menu_show_configure(plugin);
 
-    /* Set up file monitor for credentials changes */
-    claude_status_setup_creds_monitor(data);
+    /* Start file monitor via Rust */
+    claude_status_core_start_monitor(data->core, data->creds_file);
 
     /* Initial fetch */
     claude_status_fetch_usage(data);
@@ -1222,19 +879,12 @@ static void claude_status_free(XfcePanelPlugin *plugin, ClaudeStatusPlugin *data
         g_source_remove(data->timeout_id);
     }
 
-    /* Cancel any in-flight HTTP requests */
-    if (data->cancellable) {
-        g_cancellable_cancel(data->cancellable);
-        g_clear_object(&data->cancellable);
-    }
+    /* Stop Rust file monitor */
+    claude_status_core_stop_monitor(data->core);
 
-    if (data->creds_monitor) {
-        g_file_monitor_cancel(data->creds_monitor);
-        g_clear_object(&data->creds_monitor);
-    }
+    /* Free Rust core */
+    claude_status_core_free(data->core);
 
-    g_clear_object(&data->session);
-    g_free(data->access_token);
     g_free(data->plan_name);
     g_free(data->five_hour_reset_str);
     g_free(data->seven_day_reset_str);

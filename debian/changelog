@@ -1,3 +1,13 @@
+xfce4-claude-status-plugin (0.2.0-1) unstable; urgency=low
+
+  * Rewrite core logic in Rust with C FFI wrapper
+  * Move credential loading, API client, transcript parsing to Rust
+  * Add file monitoring for credentials changes using notify crate
+  * Remove json-glib and libsoup dependencies (now handled by Rust)
+  * Improve error handling and code organization
+
+ -- James Curbo <james@curbo.org>  Wed, 21 Jan 2026 16:07:00 -0500
+
 xfce4-claude-status-plugin (0.1.0-1) unstable; urgency=low
 
   * Initial release

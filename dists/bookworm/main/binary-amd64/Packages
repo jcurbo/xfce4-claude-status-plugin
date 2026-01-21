@@ -15,6 +15,23 @@ Size: 3800
 MD5sum: b8562a0d322bcb02fb972fd5fcf6e728
 SHA256: d431762bcb61b658a13c4c30a987178ea149c1b4bd639ccf4987ba11955e6be0
 
+Package: xfce4-claude-status-plugin-dbgsym
+Source: xfce4-claude-status-plugin
+Version: 0.2.0-1
+Auto-Built-Package: debug-symbols
+Architecture: amd64
+Maintainer: James Curbo <james@curbo.org>
+Installed-Size: 976
+Depends: xfce4-claude-status-plugin (= 0.2.0-1)
+Section: debug
+Priority: optional
+Description: debug symbols for xfce4-claude-status-plugin
+Build-Ids: 3dc76e075c3fda483b9a7bd78ae4a1e663e83a8b
+Filename: pool/main/xfce4-claude-status-plugin-dbgsym_0.2.0-1_amd64_bookworm.deb
+Size: 630996
+MD5sum: 80c821f75b7ba0bc50651c6fb052ac63
+SHA256: 3693fc174d5932c82c07ae8823746f98f296c92dea2506c5364623336aa5fa0f
+
 Package: xfce4-claude-status-plugin
 Version: 0.1.0-1
 Architecture: amd64
@@ -34,4 +51,24 @@ Filename: pool/main/xfce4-claude-status-plugin_0.1.0-1_amd64_bookworm.deb
 Size: 13436
 MD5sum: 9d6d796b040886aa513ff15b9eb7d64e
 SHA256: 5112a758a2f84f4135fd2dda82bd92baaed993bc9e51e1645ac5fd1ace8de6a0
+
+Package: xfce4-claude-status-plugin
+Version: 0.2.0-1
+Architecture: amd64
+Maintainer: James Curbo <james@curbo.org>
+Installed-Size: 2040
+Depends: libc6 (>= 2.34), libgcc-s1 (>= 4.2), libglib2.0-0 (>= 2.35.9), libgtk-3-0 (>= 3.24), libxfce4panel-2.0-4 (>= 4.18), libxfce4ui-2-0 (>= 4.18), libxfce4util7 (>= 4.9.0)
+Section: xfce
+Priority: optional
+Homepage: https://github.com/jcurbo/xfce4-claude-status-plugin
+Description: XFCE panel plugin showing Claude Max/Pro usage limits
+ Displays Claude API rate limit usage (5-hour and 7-day windows)
+ with colored progress bars in the XFCE panel.
+ .
+ Requires Claude Code to be installed and logged in with a
+ Max or Pro subscription.
+Filename: pool/main/xfce4-claude-status-plugin_0.2.0-1_amd64_bookworm.deb
+Size: 900752
+MD5sum: c69dc747b52d25f2418194e95bd779fb
+SHA256: 35ff9c8c9913ddf87c8f8aaa29c95f052cab4c867563866218d88c1cf672344a
 

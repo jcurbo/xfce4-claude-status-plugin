@@ -74,8 +74,8 @@ pub enum CResultCode {
 // Static storage for strings returned to C
 // These are overwritten on each call, so C code must copy if needed
 thread_local! {
-    static MODEL_NAME: std::cell::RefCell<Option<CString>> = const { std::cell::RefCell::new(None) };
-    static PLAN_NAME: std::cell::RefCell<Option<CString>> = const { std::cell::RefCell::new(None) };
+    static MODEL_NAME: std::cell::RefCell<Option<CString>> = std::cell::RefCell::new(None);
+    static PLAN_NAME: std::cell::RefCell<Option<CString>> = std::cell::RefCell::new(None);
 }
 
 /// Create a new core instance

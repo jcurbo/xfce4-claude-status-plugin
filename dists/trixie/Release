@@ -6,8 +6,8 @@ Architectures: amd64
 Components: main
 Description: XFCE4 Claude Status Plugin apt repository
 MD5Sum:
- dd604ad452f5c17a52b8174bef74b8b5 3011 main/binary-amd64/Packages
- 54c8478001f2f5a5f0e391ed5eeb4ae4 989 main/binary-amd64/Packages.gz
+ 1c9f7c5253dc2abd127269061276a0fe 4502 main/binary-amd64/Packages
+ bbb081f680093376fcf2659655ddabc7 1185 main/binary-amd64/Packages.gz
 SHA256:
- 2b94293fb62502a9c0ee37f0be0242e95584473c1b5ba8b748c0910820f47263 3011 main/binary-amd64/Packages
- a78d1500bf3e2ecd5460c567999d702bfaac30f4fb59009f8725249c219c2a1e 989 main/binary-amd64/Packages.gz
+ 8bc9d8d4bed44c1417dd6ea0ee53eba2e3884ceef2aefdb153438d1208de3fdb 4502 main/binary-amd64/Packages
+ 6efcb728551acbc2feaa9b22cd9fe11d951e7db2c7d0cb1e97afdbe51ca3a230 1185 main/binary-amd64/Packages.gz

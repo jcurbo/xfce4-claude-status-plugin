@@ -822,6 +822,24 @@ static void claude_status_configure(XfcePanelPlugin *plugin, ClaudeStatusPlugin 
     gtk_widget_show_all(dialog);
 }
 
+/* About dialog */
+static void claude_status_about(XfcePanelPlugin *plugin) {
+    const gchar *authors[] = {
+        "James Curbo <james@curbo.org>",
+        NULL
+    };
+
+    gtk_show_about_dialog(NULL,
+        "program-name", "Claude Status",
+        "version", "0.2.1",
+        "comments", "Shows Claude Max/Pro usage limits in the XFCE panel",
+        "website", "https://github.com/jcurbo/xfce4-claude-status-plugin",
+        "license-type", GTK_LICENSE_MIT_X11,
+        "authors", authors,
+        "copyright", "Copyright \xc2\xa9 2026 James Curbo",
+        NULL);
+}
+
 /* Build the plugin UI */
 static void claude_status_construct(XfcePanelPlugin *plugin) {
     ClaudeStatusPlugin *data = g_new0(ClaudeStatusPlugin, 1);
@@ -862,6 +880,8 @@ static void claude_status_construct(XfcePanelPlugin *plugin) {
     g_signal_connect(plugin, "save", G_CALLBACK(claude_status_save_config), data);
 
     xfce_panel_plugin_menu_show_configure(plugin);
+    xfce_panel_plugin_menu_show_about(plugin);
+    g_signal_connect(plugin, "about", G_CALLBACK(claude_status_about), NULL);
 
     /* Start file monitor via Rust */
     claude_status_core_start_monitor(data->core, data->creds_file);

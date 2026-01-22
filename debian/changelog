@@ -1,3 +1,9 @@
+xfce4-claude-status-plugin (0.2.1-1) unstable; urgency=low
+
+  * Add About dialog accessible from plugin right-click menu
+
+ -- James Curbo <james@curbo.org>  Wed, 21 Jan 2026 18:20:00 -0500
+
 xfce4-claude-status-plugin (0.2.0-1) unstable; urgency=low
 
   * Rewrite core logic in Rust with C FFI wrapper
